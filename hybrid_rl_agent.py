@@ -1,361 +1,413 @@
 #!/usr/bin/env python3
 """
-Hybrid RL Agent for UAV DDoS Detection
-Combines Q-table with Neural Network for exact + approximated learning
+Hybrid RL Agent for UAV DDoS defense using lookup table with Q-learning
+Combines expert knowledge with reinforcement learning
 """
 
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, models
 import json
-from datetime import datetime
 import os
-import random
+from collections import defaultdict
+import itertools
+from typing import Dict, Tuple, List
+import logging
 
-class ActorCriticNetwork:
-    """Neural approximation for state-action values"""
-    
-    def __init__(self, state_dim=4, action_dim=3):
-        # Actor network (policy)
-        self.actor = models.Sequential([
-            layers.Dense(64, activation='relu', input_shape=(state_dim,)),
-            layers.Dense(32, activation='relu'),
-            layers.Dense(action_dim, activation='softmax')
-        ])
-        
-        # Critic network (value function)
-        self.critic = models.Sequential([
-            layers.Dense(64, activation='relu', input_shape=(state_dim,)),
-            layers.Dense(32, activation='relu'),
-            layers.Dense(1)  # Single value output (state value)
-        ])
-        
-        # Compile models
-        self.actor.compile(optimizer='adam', loss='categorical_crossentropy')
-        self.critic.compile(optimizer='adam', loss='mse')
-    
-    def encode_state(self, state):
-        """Convert state dictionary to vector for neural network"""
-        # Convert battery level string to numeric
-        battery_map = {
-            "0-20%": 0.1,
-            "21-40%": 0.3,
-            "41-60%": 0.5,
-            "61-80%": 0.7,
-            "81-100%": 0.9
-        }
-        
-        # Convert temperature string to numeric
-        temp_map = {
-            "Safe": 0.2,
-            "Warning": 0.6,
-            "Critical": 0.9
-        }
-        
-        # Convert threat state string to numeric
-        threat_map = {
-            "Normal": 0.1,
-            "Confirming": 0.5,
-            "Confirmed": 0.9
-        }
-        
-        # Encode state as vector
-        battery_val = battery_map.get(state['battery'], 0.5)
-        temp_val = temp_map.get(state['temperature'], 0.5)
-        threat_val = threat_map.get(state['threat'], 0.5)
-        
-        # Include time since last change if available
-        time_val = state.get('time_since_change', 0.0) / 300.0  # Normalize to [0,1]
-        
-        return np.array([[battery_val, temp_val, threat_val, time_val]])
-    
-    def get_action_probs(self, state):
-        """Get action probabilities from actor network"""
-        state_encoded = self.encode_state(state)
-        return self.actor.predict(state_encoded, verbose=0)[0]
-    
-    def get_value(self, state):
-        """Get state value from critic network"""
-        state_encoded = self.encode_state(state)
-        return self.critic.predict(state_encoded, verbose=0)[0][0]
-    
-    def update(self, states, actions, rewards, next_states, dones):
-        """Update both actor and critic networks with a batch of experiences"""
-        # Encode all states and next_states
-        encoded_states = np.vstack([self.encode_state(s) for s in states])
-        encoded_next_states = np.vstack([self.encode_state(s) for s in next_states])
-        
-        # Get values for next states
-        next_values = self.critic.predict(encoded_next_states, verbose=0).flatten()
-        
-        # Calculate targets for critic (TD targets)
-        targets = np.array(rewards) + 0.99 * next_values * (1 - np.array(dones))
-        
-        # Update critic
-        self.critic.train_on_batch(encoded_states, targets.reshape(-1, 1))
-        
-        # One-hot encode actions
-        action_masks = np.zeros((len(actions), 3))
-        for i, action in enumerate(actions):
-            action_masks[i, action] = 1
-        
-        # Calculate advantages
-        values = self.critic.predict(encoded_states, verbose=0).flatten()
-        advantages = targets - values
-        
-        # Custom loss that incorporates advantages
-        weighted_actions = action_masks * advantages.reshape(-1, 1)
-        
-        # Update actor
-        self.actor.train_on_batch(encoded_states, weighted_actions)
-
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 class HybridRLAgent:
     """
-    Hybrid RL Agent that combines:
-    1. Q-table for exact state lookup
-    2. Neural network for generalization
-    3. Expert knowledge initialization
+    Hybrid RL Agent that combines lookup table, Q-learning and neural network
+    for UAV DDoS defense with power and thermal awareness
     """
     
-    def __init__(self, env, learning_rate=0.1, discount_factor=0.9, 
-                 epsilon=0.3, epsilon_decay=0.995, epsilon_min=0.05):
+    def __init__(self, env):
+        # Store environment
         self.env = env
-        self.lr = learning_rate
-        self.gamma = discount_factor
-        self.epsilon = epsilon
-        self.epsilon_decay = epsilon_decay
-        self.epsilon_min = epsilon_min
+        
+        # State discretization
+        self.setup_state_discretization()
+        
+        # Q-learning parameters
+        self.alpha = 0.1          # Learning rate
+        self.gamma = 0.95         # Discount factor
+        self.epsilon = 0.3        # Initial exploration rate
+        self.epsilon_min = 0.01   # Minimum exploration rate
+        self.epsilon_decay = 0.995 # Exploration decay rate
         
         # Initialize Q-table with expert knowledge
-        self.num_states = 45  # 5 battery × 3 temp × 3 threat
-        self.num_actions = 3
-        self.q_table = self._initialize_q_table()
+        self.q_table = defaultdict(lambda: defaultdict(float))
+        self.visit_count = defaultdict(lambda: defaultdict(int))
+        self.warm_start_q_table()
         
-        # Initialize neural approximator
-        self.neural_net = ActorCriticNetwork()
+        # Simple neural network for continuous state representation
+        self.neural_net = self._build_neural_network()
+        self.neural_buffer = []
+        self.neural_batch_size = 64
+        self.neural_update_frequency = 10
+        self.neural_usage_rate = 0.0  # Tracks how often neural net is used
         
-        # Experience buffer for neural network training
-        self.experience_buffer = []
-        self.buffer_size = 1000
-        self.batch_size = 32
-        
-        # Performance tracking
-        self.training_metrics = {
+        # Metrics tracking
+        self.metrics = {
             'episodes': [],
             'rewards': [],
             'expert_alignment': [],
-            'safety_violations': [],
             'power_consumption': [],
-            'epsilon_values': [],
             'thermal_metrics': [],
+            'epsilon_values': [],
             'neural_usage': []
         }
+        
+        logger.info("Hybrid RL Agent initialized with warm-start Q-table and neural network")
     
-    def _initialize_q_table(self):
+    def setup_state_discretization(self):
+        """Setup state discretization for lookup table"""
+        # Define state bins
+        self.state_bins = {
+            'temperature': [0, 55, 65, 70, 80, 100],     # 5 thermal zones
+            'battery': [0, 20, 40, 70, 100],             # 4 battery levels
+            'threat': [0, 1, 2],                         # 3 threat states
+        }
+        
+        # Calculate state space size
+        self.state_space_size = 1
+        for key, bins in self.state_bins.items():
+            self.state_space_size *= (len(bins) - 1)
+        
+        logger.info(f"State space discretized into {self.state_space_size} states")
+    
+    def warm_start_q_table(self):
         """Initialize Q-table with expert knowledge"""
-        q_table = np.random.normal(0, 0.1, (self.num_states, self.num_actions))
+        # Generate all possible discrete states
+        temp_zones = len(self.state_bins['temperature']) - 1
+        battery_zones = len(self.state_bins['battery']) - 1
+        threat_states = len(self.state_bins['threat']) - 1
         
-        # Set HIGH values for expert actions
-        for state_key, expert_action in self.env.expert_lookup.items():
-            battery, temp, threat = state_key
-            state_idx = self.env.get_state_index(battery, temp, threat)
-            q_table[state_idx, expert_action] = 100.0  # High value for expert actions
+        all_states = list(itertools.product(range(temp_zones), range(battery_zones), range(threat_states)))
+        
+        # Initialize Q-table with expert values
+        for state in all_states:
+            # Convert to continuous state approximation for expert policy
+            continuous_state = self._discrete_to_continuous(state)
             
-            # Lower values for non-expert actions
-            for action in range(self.num_actions):
-                if action != expert_action:
-                    q_table[state_idx, action] = -10.0
+            # Get expert action for this state
+            expert_action = self.env.get_expert_action(continuous_state)
+            
+            # Initialize Q-values
+            for action in range(3):  # 3 actions: No DDoS, XGBoost, TST
+                if action == expert_action:
+                    self.q_table[state][action] = 10.0  # High value for expert action
+                else:
+                    self.q_table[state][action] = 2.0   # Lower value for other actions
+                
+                # Apply safety constraints
+                safe, _ = self.env.is_safe_action(continuous_state, action)
+                if not safe:
+                    self.q_table[state][action] = -100.0  # Strong negative value for unsafe actions
         
-        return q_table
+        logger.info(f"Q-table initialized with expert knowledge for {len(all_states)} states")
     
-    def get_action(self, state, training=True):
-        """Hybrid action selection combining Q-table and neural net"""
-        state_idx = self.env.get_state_index(state['battery'], state['temperature'], state['threat'])
+    def _build_neural_network(self):
+        """Build a simple neural network for continuous state representation"""
+        model = tf.keras.Sequential([
+            tf.keras.layers.Dense(24, activation='relu', input_shape=(3,)),
+            tf.keras.layers.Dense(24, activation='relu'),
+            tf.keras.layers.Dense(3)  # 3 actions: No DDoS, XGBoost, TST
+        ])
         
-        # Exploration with safety bias during training
-        if training and random.random() < self.epsilon:
-            return self._safe_random_action(state)
-        
-        # Try exact lookup in Q-table first
-        try:
-            # Get action from Q-table for known states
-            q_values = self.q_table[state_idx]
-            q_action = np.argmax(q_values)
-            
-            # Check confidence (are Q-values well separated?)
-            q_confidence = q_values[q_action] - np.mean(q_values)
-            
-            # If high confidence in Q-table, use it
-            if q_confidence > 20.0:  # Significant separation
-                return q_action
-            
-            # Otherwise, blend with neural network
-            neural_probs = self.neural_net.get_action_probs(state)
-            
-            # Weighted combination (75% Q-table, 25% neural)
-            combined_values = 0.75 * q_values + 0.25 * neural_probs * 100.0
-            
-            return np.argmax(combined_values)
-            
-        except (IndexError, KeyError):
-            # Fallback to neural network for unknown states
-            neural_probs = self.neural_net.get_action_probs(state)
-            return np.argmax(neural_probs)
+        model.compile(optimizer='adam', loss='mse')
+        return model
     
-    def _safe_random_action(self, state):
-        """Safe exploration strategy"""
-        # Always No_DDoS for critical conditions
-        if state['battery'] == "0-20%" or state['temperature'] == "Critical":
-            return 0
+    def _discretize_state(self, state: Dict) -> Tuple:
+        """Convert continuous state to discrete state tuple"""
+        discrete = []
         
+        # Temperature zone
+        temp = state.get('temperature', 50)
+        discrete.append(np.digitize(temp, self.state_bins['temperature']) - 1)
+        
+        # Battery level
+        battery = state.get('battery', 80)
+        discrete.append(np.digitize(battery, self.state_bins['battery']) - 1)
+        
+        # Threat level (already discrete)
+        threat = state.get('threat', 0)
+        discrete.append(min(threat, 2))
+        
+        return tuple(discrete)
+    
+    def _discrete_to_continuous(self, discrete_state: Tuple) -> Dict:
+        """Convert discrete state back to continuous approximation"""
+        temp_zone, battery_zone, threat_level = discrete_state
+        
+        # Use midpoints of bins
+        temp_bins = self.state_bins['temperature']
+        battery_bins = self.state_bins['battery']
+        
+        # Get midpoints of the bins
+        temp = (temp_bins[temp_zone] + temp_bins[temp_zone + 1]) / 2
+        battery = (battery_bins[battery_zone] + battery_bins[battery_zone + 1]) / 2
+        
+        return {
+            'temperature': temp,
+            'battery': battery,
+            'threat': threat_level
+        }
+    
+    def _state_to_array(self, state: Dict) -> np.ndarray:
+        """Convert state dict to array for neural network"""
+        return np.array([
+            state.get('temperature', 50) / 100.0,  # Normalize to [0,1]
+            state.get('battery', 50) / 100.0,      # Normalize to [0,1]
+            state.get('threat', 0) / 2.0           # Normalize to [0,1]
+        ]).reshape(1, -1)
+    
+    def get_action(self, state: Dict, training: bool = True) -> int:
+        """Get action using hybrid approach (Q-table + neural network)"""
+        # Discretize state for Q-table
+        discrete_state = self._discretize_state(state)
+        
+        # Get valid actions (remove unsafe actions)
+        valid_actions = []
+        for action in range(3):
+            safe, _ = self.env.is_safe_action(state, action)
+            if safe:
+                valid_actions.append(action)
+        
+        if not valid_actions:
+            return 0  # Default to No DDoS if no safe actions
+        
+        # Exploration during training
+        if training and np.random.random() < self.epsilon:
+            return np.random.choice(valid_actions)
+        
+        # Decide whether to use Q-table or neural network
+        use_neural = False
+        
+        # Check if this state has been visited enough in the Q-table
+        if sum(self.visit_count[discrete_state].values()) < 5:
+            # Not enough Q-table data, try neural network
+            if np.random.random() < 0.5 and training:
+                use_neural = True
+                self.neural_usage_rate = 0.9 * self.neural_usage_rate + 0.1 * 1.0
+            else:
+                self.neural_usage_rate = 0.9 * self.neural_usage_rate + 0.1 * 0.0
+        
+        if use_neural:
+            # Use neural network prediction
+            state_array = self._state_to_array(state)
+            q_values = self.neural_net.predict(state_array, verbose=0)[0]
+            
+            # Filter to only valid actions
+            valid_q_values = {action: q_values[action] for action in valid_actions}
+            return max(valid_q_values, key=valid_q_values.get)
+        else:
+            # Use Q-table
+            valid_q_values = {action: self.q_table[discrete_state][action] for action in valid_actions}
+            return max(valid_q_values, key=valid_q_values.get)
+    
+    def update(self, state: Dict, action: int, reward: float, next_state: Dict, done: bool):
+        """Update agent with experience"""
+        # Update Q-table
+        self._update_q_table(state, action, reward, next_state, done)
+        
+        # Store experience for neural network
+        self.neural_buffer.append((state, action, reward, next_state, done))
+        
+        # Periodically train neural network
+        if len(self.neural_buffer) >= self.neural_batch_size:
+            self._update_neural_network()
+    
+    def _update_q_table(self, state: Dict, action: int, reward: float, next_state: Dict, done: bool):
+        """Update Q-table with experience"""
+        # Discretize states
+        discrete_state = self._discretize_state(state)
+        discrete_next_state = self._discretize_state(next_state)
+        
+        # Get current Q-value
+        current_q = self.q_table[discrete_state][action]
+        
+        # Expert alignment bonus
         expert_action = self.env.get_expert_action(state)
-        # 70% chance to follow expert even during exploration
-        return expert_action if random.random() < 0.7 else random.choice([0, 1, 2])
-    
-    def update_q_value(self, state, action, reward, next_state):
-        """Update Q-table using Q-learning"""
-        state_idx = self.env.get_state_index(state['battery'], state['temperature'], state['threat'])
-        next_state_idx = self.env.get_state_index(next_state['battery'], next_state['temperature'], next_state['threat'])
+        expert_bonus = 2.0 if action == expert_action else -0.5
         
-        old_q = self.q_table[state_idx, action]
-        next_max_q = np.max(self.q_table[next_state_idx])
-        new_q = old_q + self.lr * (reward + self.gamma * next_max_q - old_q)
-        self.q_table[state_idx, action] = new_q
+        # Compute target Q-value with expert bonus
+        if done:
+            target_q = reward + expert_bonus
+        else:
+            # Get best next action from Q-table
+            max_next_q = max(self.q_table[discrete_next_state].values())
+            target_q = reward + expert_bonus + self.gamma * max_next_q
         
-        # Add to experience buffer for neural network training
-        self.experience_buffer.append((state, action, reward, next_state, 1 if next_state == state else 0))
-        if len(self.experience_buffer) > self.buffer_size:
-            self.experience_buffer.pop(0)  # Remove oldest experience
+        # Apply safety check (prevent learning unsafe actions)
+        safe, _ = self.env.is_safe_action(state, action)
+        if not safe:
+            target_q = -100.0  # Strong penalty for unsafe actions
+        
+        # Update Q-value with adaptive learning rate
+        visit_count = self.visit_count[discrete_state][action]
+        adaptive_alpha = self.alpha / (1.0 + 0.01 * visit_count)  # Decay learning rate with visits
+        
+        self.q_table[discrete_state][action] = current_q + adaptive_alpha * (target_q - current_q)
+        self.visit_count[discrete_state][action] += 1
     
-    def train_neural_network(self):
-        """Train neural network with batch from experience buffer"""
-        if len(self.experience_buffer) < self.batch_size:
-            return 0  # Not enough samples
+    def _update_neural_network(self):
+        """Update neural network with experiences from buffer"""
+        if len(self.neural_buffer) < self.neural_batch_size:
+            return
+        
+        # Sample batch from buffer
+        indices = np.random.choice(len(self.neural_buffer), self.neural_batch_size, replace=False)
+        batch = [self.neural_buffer[i] for i in indices]
+        
+        # Prepare training data
+        states = np.zeros((self.neural_batch_size, 3))
+        targets = np.zeros((self.neural_batch_size, 3))
+        
+        for i, (state, action, reward, next_state, done) in enumerate(batch):
+            # Convert state to array
+            states[i] = self._state_to_array(state).flatten()
             
-        # Sample batch
-        batch_indices = np.random.choice(len(self.experience_buffer), self.batch_size, replace=False)
-        batch = [self.experience_buffer[i] for i in batch_indices]
+            # Get current Q-values prediction
+            target = self.neural_net.predict(states[i].reshape(1, -1), verbose=0)[0]
+            
+            if done:
+                target[action] = reward
+            else:
+                # Get next state Q-values
+                next_state_array = self._state_to_array(next_state)
+                next_q_values = self.neural_net.predict(next_state_array, verbose=0)[0]
+                
+                # Apply Bellman equation
+                target[action] = reward + self.gamma * np.max(next_q_values)
+            
+            targets[i] = target
         
-        # Unpack batch
-        states, actions, rewards, next_states, dones = zip(*batch)
+        # Train neural network
+        self.neural_net.fit(states, targets, epochs=1, verbose=0)
         
-        # Update neural network
-        self.neural_net.update(states, actions, rewards, next_states, dones)
-        
-        return 1  # Successfully trained
+        # Clear buffer
+        self.neural_buffer = []
     
-    def train(self, num_episodes=200):
-        """Train agent with expert guidance"""
-        print(f"Starting hybrid training: {num_episodes} episodes")
-        
+    def train(self, num_episodes=300, max_steps=300):
+        """Train the agent"""
         for episode in range(num_episodes):
             state = self.env.reset()
             total_reward = 0
             expert_agreements = 0
             total_actions = 0
-            neural_usage = 0
             
-            while True:
+            for step in range(max_steps):
                 # Get action
                 action = self.get_action(state, training=True)
-                expert_action = self.env.get_expert_action(state)
                 
-                # Track expert alignment
+                # Check if matches expert
+                expert_action = self.env.get_expert_action(state)
                 if action == expert_action:
                     expert_agreements += 1
                 total_actions += 1
                 
-                # Take step
+                # Take action
                 next_state, reward, done = self.env.step(action)
+                
+                # Update agent
+                self.update(state, action, reward, next_state, done)
+                
+                # Update metrics
                 total_reward += reward
-                
-                # Update Q-table
-                self.update_q_value(state, action, reward, next_state)
-                
-                # Train neural network periodically
-                if episode % 5 == 0:  # Every 5 episodes
-                    neural_usage += self.train_neural_network()
-                
                 state = next_state
                 
                 if done:
                     break
             
-            # Decay exploration
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay
+            # Update exploration rate
+            self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
             
-            # Track metrics
-            self.training_metrics['episodes'].append(episode)
-            self.training_metrics['rewards'].append(total_reward)
-            self.training_metrics['expert_alignment'].append(expert_agreements / total_actions if total_actions > 0 else 0)
-            self.training_metrics['safety_violations'].append(self.env.safety_violations)
-            self.training_metrics['power_consumption'].append(self.env.total_power_consumed)
-            self.training_metrics['epsilon_values'].append(self.epsilon)
-            self.training_metrics['thermal_metrics'].append(self.env.thermal_simulator.get_temperature())
-            self.training_metrics['neural_usage'].append(neural_usage / total_actions if total_actions > 0 else 0)
+            # Record metrics
+            expert_alignment = expert_agreements / total_actions if total_actions > 0 else 0
             
-            if episode % 20 == 0:
-                print(f"Episode {episode}: Reward={total_reward:.1f}, "
-                      f"Expert Align={expert_agreements/total_actions if total_actions > 0 else 0:.3f}, "
-                      f"Safety Violations={self.env.safety_violations}, "
-                      f"Temp={self.env.thermal_simulator.get_temperature():.1f}°C")
+            self.metrics['episodes'].append(episode)
+            self.metrics['rewards'].append(total_reward)
+            self.metrics['expert_alignment'].append(expert_alignment)
+            self.metrics['power_consumption'].append(self.env.total_power_consumed)
+            self.metrics['thermal_metrics'].append(self.env.thermal_simulator.get_temperature())
+            self.metrics['epsilon_values'].append(self.epsilon)
+            self.metrics['neural_usage'].append(self.neural_usage_rate)
+            
+            # Log progress
+            if episode % 10 == 0:
+                logger.info(f"Episode {episode}/{num_episodes}: "
+                           f"Reward={total_reward:.2f}, "
+                           f"Expert={expert_alignment:.2%}, "
+                           f"Temperature={self.env.thermal_simulator.get_temperature():.1f}°C, "
+                           f"Power={self.env.total_power_consumed:.2f}W")
         
-        return self.training_metrics
+        logger.info(f"Training completed after {num_episodes} episodes")
+        return self.metrics
     
     def save_model(self, filepath):
-        """Save hybrid model (Q-table + neural weights)"""
-        model_dir = os.path.dirname(filepath)
-        if model_dir and not os.path.exists(model_dir):
-            os.makedirs(model_dir)
-            
-        # Save Q-table and training metrics
+        """Save the trained model"""
+        # Save Q-table (convert to regular dict for JSON serialization)
+        q_table_dict = {str(k): dict(v) for k, v in self.q_table.items()}
+        
+        # Save visit counts
+        visit_count_dict = {str(k): dict(v) for k, v in self.visit_count.items()}
+        
+        # Save neural network
+        nn_path = filepath.replace('.json', '_nn')
+        self.neural_net.save(nn_path)
+        
+        # Create model data
         model_data = {
-            'q_table': self.q_table.tolist(),
-            'training_params': {
-                'learning_rate': self.lr,
-                'discount_factor': self.gamma,
-                'epsilon': self.epsilon,
-                'num_states': self.num_states,
-                'num_actions': self.num_actions
-            },
-            'expert_lookup': self.env.expert_lookup,
-            'training_metrics': self.training_metrics,
-            'timestamp': datetime.now().isoformat()
+            'q_table': q_table_dict,
+            'visit_count': visit_count_dict,
+            'state_bins': self.state_bins,
+            'neural_network_path': nn_path,
+            'params': {
+                'alpha': self.alpha,
+                'gamma': self.gamma,
+                'epsilon': self.epsilon
+            }
         }
         
+        # Save to JSON
         with open(filepath, 'w') as f:
             json.dump(model_data, f, indent=2)
-            
-        # Save neural network weights
-        neural_path = filepath.replace('.json', '_neural')
-        self.neural_net.actor.save_weights(f"{neural_path}_actor.h5")
-        self.neural_net.critic.save_weights(f"{neural_path}_critic.h5")
         
-        print(f"Model saved to: {filepath}")
-        print(f"Neural weights saved to: {neural_path}_actor.h5 and {neural_path}_critic.h5")
-        
+        logger.info(f"Model saved to {filepath} and {nn_path}")
+    
     def load_model(self, filepath):
-        """Load hybrid model (Q-table + neural weights)"""
-        try:
-            with open(filepath, 'r') as f:
-                model_data = json.load(f)
-                
-            self.q_table = np.array(model_data['q_table'])
-            self.lr = model_data['training_params']['learning_rate']
-            self.gamma = model_data['training_params']['discount_factor']
-            self.epsilon = model_data['training_params']['epsilon']
-            
-            # Load neural network weights
-            neural_path = filepath.replace('.json', '_neural')
-            self.neural_net.actor.load_weights(f"{neural_path}_actor.h5")
-            self.neural_net.critic.load_weights(f"{neural_path}_critic.h5")
-            
-            print(f"Model loaded from: {filepath}")
-            print(f"Neural weights loaded from: {neural_path}_actor.h5 and {neural_path}_critic.h5")
-            
-            return True
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return False
+        """Load a trained model"""
+        # Load from JSON
+        with open(filepath, 'r') as f:
+            model_data = json.load(f)
+        
+        # Load Q-table
+        self.q_table = defaultdict(lambda: defaultdict(float))
+        for state_str, actions in model_data['q_table'].items():
+            state = tuple(map(int, state_str.strip('()').split(', ')))
+            for action_str, value in actions.items():
+                self.q_table[state][int(action_str)] = value
+        
+        # Load visit counts
+        self.visit_count = defaultdict(lambda: defaultdict(int))
+        for state_str, actions in model_data['visit_count'].items():
+            state = tuple(map(int, state_str.strip('()').split(', ')))
+            for action_str, value in actions.items():
+                self.visit_count[state][int(action_str)] = value
+        
+        # Load state bins
+        self.state_bins = model_data['state_bins']
+        
+        # Load parameters
+        self.alpha = model_data['params']['alpha']
+        self.gamma = model_data['params']['gamma']
+        self.epsilon = model_data['params']['epsilon']
+        
+        # Load neural network
+        nn_path = model_data['neural_network_path']
+        self.neural_net = tf.keras.models.load_model(nn_path)
+        
+        logger.info(f"Model loaded from {filepath}")

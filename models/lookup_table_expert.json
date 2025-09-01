@@ -1,0 +1,74 @@
+{
+  "lookup_table": {
+    "0-20%|Safe|Normal": 0,
+    "0-20%|Safe|Confirming": 0,
+    "0-20%|Safe|Confirmed": 0,
+    "0-20%|Warning|Normal": 0,
+    "0-20%|Warning|Confirming": 0,
+    "0-20%|Warning|Confirmed": 0,
+    "0-20%|Critical|Normal": 0,
+    "0-20%|Critical|Confirming": 0,
+    "0-20%|Critical|Confirmed": 0,
+    "21-40%|Safe|Normal": 0,
+    "21-40%|Safe|Confirming": 1,
+    "21-40%|Safe|Confirmed": 1,
+    "21-40%|Warning|Normal": 0,
+    "21-40%|Warning|Confirming": 1,
+    "21-40%|Warning|Confirmed": 1,
+    "21-40%|Critical|Normal": 0,
+    "21-40%|Critical|Confirming": 0,
+    "21-40%|Critical|Confirmed": 0,
+    "41-60%|Safe|Normal": 1,
+    "41-60%|Safe|Confirming": 2,
+    "41-60%|Safe|Confirmed": 1,
+    "41-60%|Warning|Normal": 1,
+    "41-60%|Warning|Confirming": 2,
+    "41-60%|Warning|Confirmed": 1,
+    "41-60%|Critical|Normal": 0,
+    "41-60%|Critical|Confirming": 0,
+    "41-60%|Critical|Confirmed": 0,
+    "61-80%|Safe|Normal": 1,
+    "61-80%|Safe|Confirming": 2,
+    "61-80%|Safe|Confirmed": 1,
+    "61-80%|Warning|Normal": 1,
+    "61-80%|Warning|Confirming": 2,
+    "61-80%|Warning|Confirmed": 1,
+    "61-80%|Critical|Normal": 0,
+    "61-80%|Critical|Confirming": 0,
+    "61-80%|Critical|Confirmed": 0,
+    "81-100%|Safe|Normal": 1,
+    "81-100%|Safe|Confirming": 2,
+    "81-100%|Safe|Confirmed": 1,
+    "81-100%|Warning|Normal": 1,
+    "81-100%|Warning|Confirming": 2,
+    "81-100%|Warning|Confirmed": 1,
+    "81-100%|Critical|Normal": 0,
+    "81-100%|Critical|Confirming": 0,
+    "81-100%|Critical|Confirmed": 0
+  },
+  "state_space": {
+    "battery_levels": [
+      "0-20%",
+      "21-40%",
+      "41-60%",
+      "61-80%",
+      "81-100%"
+    ],
+    "temperatures": [
+      "Safe",
+      "Warning",
+      "Critical"
+    ],
+    "threat_states": [
+      "Normal",
+      "Confirming",
+      "Confirmed"
+    ]
+  },
+  "action_labels": [
+    "No_DDoS",
+    "XGBoost",
+    "TST"
+  ],
+  "timestamp": "2025-09-02T02:53:07.030673"
+}

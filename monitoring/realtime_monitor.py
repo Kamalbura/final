@@ -40,7 +40,8 @@ class AlgorithmProfile:
     thermal_coefficient: float
     effectiveness: float
     memory_impact: float
-    cooling_factor: float  # Added cooling factor for algorithm-specific cooling
+    cooling_factor: float
+    warmup_time: float  # Time to reach peak temp (seconds)
 
 class ThermalSimulator:
     """High-fidelity thermal simulation for Raspberry Pi UAV system"""
@@ -53,97 +54,150 @@ class ThermalSimulator:
         self.current_temp = 50.0  # °C starting temperature
         self.temp_history = []
         
-        # Algorithm profiles with cooling factors (based on your measurements)
+        # Algorithm profiles with measured real-world thermal behavior
         self.algorithms = {
-            'No_DDoS': AlgorithmProfile(8, 5, 1.0, 0.02, 0.0, 0.0, 1.5),    # Fastest cooling
-            'XGBoost': AlgorithmProfile(35, 15, 1.4, 0.12, 0.85, 2.0, 1.0),  # Standard cooling
-            'TST': AlgorithmProfile(85, 10, 2.1, 0.25, 0.95, 14.0, 0.5),     # Slowest cooling
+            'No_DDoS': AlgorithmProfile(
+                cpu_avg=8,
+                cpu_variance=5, 
+                power_factor=1.0, 
+                thermal_coefficient=0.02,
+                effectiveness=0.0, 
+                memory_impact=0.0, 
+                cooling_factor=1.8,  # Fastest cooling
+                warmup_time=30       # Quick stabilization
+            ),
+            'XGBoost': AlgorithmProfile(
+                cpu_avg=35,
+                cpu_variance=15, 
+                power_factor=1.4, 
+                thermal_coefficient=0.10,  # Reduced from 0.12
+                effectiveness=0.85, 
+                memory_impact=2.0, 
+                cooling_factor=1.0,   # Standard cooling
+                warmup_time=60        # Moderate warmup
+            ),
+            'TST': AlgorithmProfile(
+                cpu_avg=85,           # High CPU usage
+                cpu_variance=10, 
+                power_factor=2.1, 
+                thermal_coefficient=0.20,  # Adjusted for 2-minute warmup
+                effectiveness=0.95, 
+                memory_impact=14.0, 
+                cooling_factor=0.5,    # Slower cooling
+                warmup_time=120        # Takes 2 minutes to reach peak temp
+            ),
         }
         
-        # Thermal time constants from data analysis
-        self.heating_rate = 0.125  # °C/second at high load
-        self.cooling_rate = 0.05   # °C/second at idle
-        self.thermal_lag = 60      # seconds thermal time constant
+        # Thermal time constants calibrated to observed behavior
+        self.heating_rate = 0.15      # Slightly increased for faster initial warmup
+        self.cooling_rate = 0.07      # Adjusted for 30s cooldown
+        self.thermal_lag = 10         # Reduced thermal lag for quicker response
         
         # Track algorithm transitions for cooling effects
         self.previous_algorithm = 'No_DDoS'
         self.algorithm_change_time = time.time()
-        self.tst_recovery_time = 240  # seconds to recover from TST (measured)
+        self.tst_recovery_time = 30   # 30 seconds to cool down from TST (observed value)
         
-        # Temperature setpoint (equilibrium temp for current algorithm)
+        # Temperature setpoint and tracking
         self.temp_setpoint = 50.0
+        self.time_at_algorithm_start = time.time()
+        self.algorithm_runtime = 0.0
         
     def update_temperature(self, algorithm_idx: int, dt: float = 1.0) -> Tuple[float, float]:
-        """Update temperature based on current algorithm with realistic cooling"""
+        """Update temperature based on current algorithm with realistic thermal behavior"""
         # Map algorithm index to name
         algorithm_names = ['No_DDoS', 'XGBoost', 'TST']
         algorithm = algorithm_names[algorithm_idx] if 0 <= algorithm_idx < 3 else 'No_DDoS'
         
         profile = self.algorithms.get(algorithm, self.algorithms['No_DDoS'])
+        current_time = time.time()
         
         # Check for algorithm transition
-        current_time = time.time()
         if algorithm != self.previous_algorithm:
             # Record algorithm change time for thermal lag calculations
             self.algorithm_change_time = current_time
+            self.time_at_algorithm_start = current_time
             
             # If coming from TST, mark this for special cooling behavior
             if self.previous_algorithm == 'TST':
-                logging.info(f"Detected transition from TST to {algorithm}, starting cooling cycle")
+                logging.info(f"Detected transition from TST to {algorithm}, starting cooling cycle (30s)")
             
             self.previous_algorithm = algorithm
+            self.algorithm_runtime = 0.0
+        else:
+            # Update runtime on current algorithm
+            self.algorithm_runtime = current_time - self.time_at_algorithm_start
         
-        # Calculate time since algorithm change to model thermal lag
+        # Calculate time since algorithm change for cooling behavior
         time_since_change = current_time - self.algorithm_change_time
-        transition_factor = min(1.0, time_since_change / self.thermal_lag)
         
-        # Heat generation (algorithm-specific)
+        # Generate realistic CPU usage based on algorithm profile
         cpu_usage = np.random.normal(profile.cpu_avg, profile.cpu_variance)
         cpu_usage = np.clip(cpu_usage, 0, 100)  # Clamp to valid range
         
-        # Calculate temperature setpoint for current algorithm
-        # This is the equilibrium temperature this algorithm would reach if run indefinitely
-        algo_setpoint = self.ambient_temp + (cpu_usage * profile.thermal_coefficient * self.thermal_resistance)
+        # Apply warmup scaling factor - TST especially takes time to reach peak temperature
+        warmup_factor = min(1.0, self.algorithm_runtime / profile.warmup_time)
         
-        # Gradual transition of setpoint based on thermal lag
-        if time_since_change < self.thermal_lag:
-            # During transition period, blend old and new setpoints
-            old_setpoint = self.temp_setpoint
-            self.temp_setpoint = old_setpoint * (1 - transition_factor) + algo_setpoint * transition_factor
+        # For TST, follow observed heating curve (slower start, then accelerating)
+        if algorithm == 'TST':
+            # Non-linear warmup - slow at first, then exponential increase
+            if warmup_factor < 0.5:
+                # First half of warmup period: slow increase
+                warmup_factor = warmup_factor * 0.8
+            else:
+                # Second half: accelerating increase
+                warmup_factor = 0.4 + (warmup_factor - 0.5) * 1.2
+        
+        # Calculate target temperature for current algorithm at current runtime
+        if algorithm == 'TST':
+            # TST peaks at around 72-75°C after 120 seconds
+            max_algo_temp = 75.0
+        elif algorithm == 'XGBoost':
+            # XGBoost stabilizes around 65°C
+            max_algo_temp = 65.0
         else:
-            # After transition period, use actual algorithm setpoint
-            self.temp_setpoint = algo_setpoint
-        
-        # Apply special cooling behavior for TST → XGBoost transition (240s recovery)
-        tst_transition_cooldown = False
-        if self.previous_algorithm == 'TST' and time_since_change < self.tst_recovery_time:
-            # Slow recovery from TST thermal buildup
-            tst_transition_cooldown = True
-            recovery_progress = time_since_change / self.tst_recovery_time
-            # Gradual cooling from TST temperature to algorithm setpoint
-            cooling_setpoint = self.temp_setpoint + (75.0 - self.temp_setpoint) * (1.0 - recovery_progress)
-            self.temp_setpoint = cooling_setpoint
-        
-        # Newton's law of cooling (heat transfer proportional to temperature difference)
-        # Direction and rate depends on whether we're heating up or cooling down
-        if self.current_temp < self.temp_setpoint:
-            # Heating up - use algorithm's thermal coefficient
-            rate = self.heating_rate
-        else:
-            # Cooling down - use algorithm's cooling factor
-            rate = self.cooling_rate * profile.cooling_factor
+            # No_DDoS stays cooler
+            max_algo_temp = 55.0
             
-            # Special case: much slower cooling when coming down from TST
-            if tst_transition_cooldown:
-                # TST has severe thermal inertia, cooling is slower than normal
-                rate *= 0.5  # 50% slower cooling during TST recovery period
+        # Calculate temperature setpoint based on warmup progression
+        base_temp = 50.0  # Starting temperature
+        algo_setpoint = base_temp + (max_algo_temp - base_temp) * warmup_factor
         
-        # Temperature change based on difference from setpoint and rate
-        temp_diff = self.temp_setpoint - self.current_temp
-        temp_change = temp_diff * rate * dt
+        # Special case for cooling from TST
+        cooling_from_tst = False
+        if self.previous_algorithm == 'TST' and time_since_change < self.tst_recovery_time:
+            cooling_from_tst = True
+            # Calculate cooling progress (0 = just switched, 1 = fully cooled)
+            cooling_progress = time_since_change / self.tst_recovery_time
+            
+            # Start from the high TST temperature and cool toward algorithm setpoint
+            # Use exponential cooling curve for more realistic behavior
+            cooling_factor = 1.0 - np.exp(-3 * cooling_progress)  # Faster initial cooling
+            high_temp = max(75.0, self.current_temp)  # Use actual temp if higher
+            
+            # Blend between high temp and target setpoint based on cooling progress
+            algo_setpoint = high_temp - (high_temp - algo_setpoint) * cooling_factor
         
-        # Apply temperature change with some noise
-        self.current_temp += temp_change + np.random.normal(0, 0.02)  # Small random fluctuations
+        # Apply temperature change using Newton's law of cooling/heating
+        temp_diff = algo_setpoint - self.current_temp
+        
+        if temp_diff > 0:  # Heating up
+            # Heating rate is influenced by algorithm's thermal coefficient
+            effective_rate = self.heating_rate * (1.0 + profile.thermal_coefficient)
+        else:  # Cooling down
+            # Cooling affected by cooling factor of current algorithm
+            effective_rate = self.cooling_rate * profile.cooling_factor
+            
+            # Faster cooling immediately after switching from TST
+            if cooling_from_tst and time_since_change < 5.0:
+                effective_rate *= 1.5  # Initial faster cooling
+        
+        # Apply temperature change with realistic physical model
+        temp_change = temp_diff * effective_rate * dt
+        
+        # Add minor noise for realism
+        temp_noise = np.random.normal(0, 0.05)
+        self.current_temp += temp_change + temp_noise
         self.temp_history.append(self.current_temp)
         
         # Keep history manageable

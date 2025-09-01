@@ -173,20 +173,38 @@ def update_thermal_status(data):
     
     # Extract temperature and determine zone
     temp = latest.get('state', {}).get('temperature', 'Unknown')
-    temp_value = 0
     
-    # Convert string temperature to numeric value if needed
-    if temp == "Safe":
-        temp_zone = "cool"
-        temp_value = 50
-    elif temp == "Warning":
-        temp_zone = "warm" 
-        temp_value = 65
-    elif temp == "Critical":
-        temp_zone = "danger"
-        temp_value = 80
+    # Determine temperature zone and value
+    if isinstance(temp, str):
+        # Handle string temperature categories
+        if temp == "Safe":
+            temp_zone = "cool"
+            temp_value = 50
+        elif temp == "Warning":
+            temp_zone = "warm" 
+            temp_value = 65
+        elif temp == "Critical":
+            temp_zone = "danger"
+            temp_value = 80
+        else:
+            try:
+                # Try to parse as a numeric string
+                temp_value = float(temp)
+                if temp_value < 55:
+                    temp_zone = "cold"
+                elif temp_value < 60:
+                    temp_zone = "cool"
+                elif temp_value < 65:
+                    temp_zone = "warm"
+                elif temp_value < 70:
+                    temp_zone = "hot"
+                else:
+                    temp_zone = "danger"
+            except:
+                temp_zone = "unknown"
+                temp_value = 0
     else:
-        # Try to extract numeric value if present
+        # Handle numeric temperature
         try:
             temp_value = float(temp)
             if temp_value < 55:
@@ -348,11 +366,23 @@ def update_temperature_graph(data):
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     
     # Extract temperature data - handle both string and numeric values
-    df['temp_value'] = df['state'].apply(lambda x: 
-        50 if x.get('temperature') == "Safe" else 
-        65 if x.get('temperature') == "Warning" else
-        80 if x.get('temperature') == "Critical" else
-        float(x.get('temperature', 0)) if isinstance(x.get('temperature'), (int, float)) else 30)
+    def extract_temp_value(state_dict):
+        temp = state_dict.get('temperature', 0)
+        if isinstance(temp, str):
+            if temp == "Safe":
+                return 50
+            elif temp == "Warning":
+                return 65
+            elif temp == "Critical":
+                return 80
+            else:
+                try:
+                    return float(temp.replace('%', ''))
+                except:
+                    return 30
+        return float(temp)
+    
+    df['temp_value'] = df['state'].apply(extract_temp_value)
     
     # Create figure with temperature plot
     fig = go.Figure()
@@ -632,82 +662,159 @@ def update_discretized_state(data):
     latest = decisions[-1]
     state = latest.get('state', {})
     
-    # Discretize state for visualization
-    # Temperature discretization
-    temp = state.get('temperature', 'Unknown')
-    if temp == "Safe":
-        temp_zone = "cool"
-    elif temp == "Warning":
-        temp_zone = "warm"
-    elif temp == "Critical":
-        temp_zone = "danger"
+    # Extract original state values (could be numeric or categorical)
+    battery_original = state.get('battery', 'Unknown')
+    temp_original = state.get('temperature', 'Unknown')
+    threat_original = state.get('threat', 'Unknown')
+    
+    # Discretize battery
+    if isinstance(battery_original, str):
+        if any(level in battery_original for level in ["0-20%", "21-40%", "41-60%", "61-80%", "81-100%"]):
+            battery_zone = battery_original
+        else:
+            try:
+                battery_value = float(battery_original.replace('%', ''))
+                if battery_value <= 20:
+                    battery_zone = "0-20%"
+                elif battery_value <= 40:
+                    battery_zone = "21-40%"
+                elif battery_value <= 60:
+                    battery_zone = "41-60%"
+                elif battery_value <= 80:
+                    battery_zone = "61-80%"
+                else:
+                    battery_zone = "81-100%"
+            except:
+                battery_zone = "unknown"
     else:
-        temp_zone = "unknown"
+        try:
+            battery_value = float(battery_original)
+            if battery_value <= 20:
+                battery_zone = "0-20%"
+            elif battery_value <= 40:
+                battery_zone = "21-40%"
+            elif battery_value <= 60:
+                battery_zone = "41-60%"
+            elif battery_value <= 80:
+                battery_zone = "61-80%"
+            else:
+                battery_zone = "81-100%"
+        except:
+            battery_zone = "unknown"
     
-    # Battery discretization
-    battery = state.get('battery', 'Unknown')
-    if battery == "0-20%":
-        battery_zone = "critical"
-    elif battery == "21-40%":
-        battery_zone = "low"
-    elif battery == "41-60%":
-        battery_zone = "medium"
-    elif battery == "61-80%":
-        battery_zone = "high"
-    elif battery == "81-100%":
-        battery_zone = "full"
+    # Discretize temperature
+    if isinstance(temp_original, str):
+        if temp_original in ["Safe", "Warning", "Critical"]:
+            temp_zone = temp_original
+        else:
+            try:
+                temp_value = float(temp_original.replace('°C', ''))
+                if temp_value <= 55:
+                    temp_zone = "Safe"
+                elif temp_value <= 70:
+                    temp_zone = "Warning"
+                else:
+                    temp_zone = "Critical"
+            except:
+                temp_zone = "unknown"
     else:
-        battery_zone = "unknown"
+        try:
+            temp_value = float(temp_original)
+            if temp_value <= 55:
+                temp_zone = "Safe"
+            elif temp_value <= 70:
+                temp_zone = "Warning"
+            else:
+                temp_zone = "Critical"
+        except:
+            temp_zone = "unknown"
     
-    # Threat discretization
-    threat = state.get('threat', 'Unknown')
+    # Discretize threat
+    if isinstance(threat_original, str):
+        if threat_original in ["Normal", "Confirming", "Confirmed"]:
+            threat_zone = threat_original
+        else:
+            threat_zone = "unknown"
+    else:
+        try:
+            threat_value = int(threat_original)
+            if threat_value == 0:
+                threat_zone = "Normal"
+            elif threat_value == 1:
+                threat_zone = "Confirming"
+            else:
+                threat_zone = "Confirmed"
+        except:
+            threat_zone = "unknown"
     
-    # Create discretized state visualization
+    # Get lookup table key
+    lookup_key = f"{battery_zone}, {temp_zone}, {threat_zone}"
+    
+    # Create discretized state visualization with lookup key info
     return html.Div([
         html.H4("Current Discretized State"),
         html.Div(style={'display': 'flex', 'justifyContent': 'space-between'}, children=[
             # Temperature zone
             html.Div([
                 html.Div("Temperature Zone", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
-                html.Div(temp_zone.upper(), style={
-                    'backgroundColor': thermal_colors.get(temp_zone, '#888888'),
+                html.Div(temp_zone, style={
+                    'backgroundColor': '#00aa00' if temp_zone == "Safe" else
+                                     '#aaaa00' if temp_zone == "Warning" else
+                                     '#aa0000',
                     'color': 'white',
                     'padding': '10px',
                     'borderRadius': '5px',
                     'textAlign': 'center',
                     'fontWeight': 'bold'
-                })
+                }),
+                html.Div(f"Raw: {temp_original}", style={'fontSize': '10px', 'textAlign': 'center', 'marginTop': '3px'})
             ], style={'width': '30%'}),
             
             # Battery zone
             html.Div([
                 html.Div("Battery Zone", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
-                html.Div(battery_zone.upper(), style={
-                    'backgroundColor': '#006600' if battery_zone in ['high', 'full'] else
-                                     '#999900' if battery_zone == 'medium' else
-                                     '#cc3300' if battery_zone in ['low', 'critical'] else '#888888',
+                html.Div(battery_zone, style={
+                    'backgroundColor': '#006600' if battery_zone in ['61-80%', '81-100%'] else
+                                     '#999900' if battery_zone == '41-60%' else
+                                     '#cc3300' if battery_zone in ['0-20%', '21-40%'] else '#888888',
                     'color': 'white',
                     'padding': '10px',
                     'borderRadius': '5px',
                     'textAlign': 'center',
                     'fontWeight': 'bold'
-                })
+                }),
+                html.Div(f"Raw: {battery_original}", style={'fontSize': '10px', 'textAlign': 'center', 'marginTop': '3px'})
             ], style={'width': '30%'}),
             
             # Threat state
             html.Div([
                 html.Div("Threat State", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
-                html.Div(threat, style={
-                    'backgroundColor': '#006600' if threat == 'Normal' else
-                                     '#cc6600' if threat == 'Confirming' else
-                                     '#cc0000' if threat == 'Confirmed' else '#888888',
+                html.Div(threat_zone, style={
+                    'backgroundColor': '#006600' if threat_zone == "Normal" else
+                                     '#cc6600' if threat_zone == "Confirming" else
+                                     '#cc0000',
                     'color': 'white',
                     'padding': '10px',
                     'borderRadius': '5px',
                     'textAlign': 'center',
                     'fontWeight': 'bold'
-                })
+                }),
+                html.Div(f"Raw: {threat_original}", style={'fontSize': '10px', 'textAlign': 'center', 'marginTop': '3px'})
             ], style={'width': '30%'})
+        ]),
+        
+        # Lookup table key visualization
+        html.Div([
+            html.Div("Lookup Table Key:", style={'fontWeight': 'bold', 'marginTop': '15px'}),
+            html.Div(lookup_key, style={
+                'backgroundColor': '#f0f0f0',
+                'padding': '10px',
+                'borderRadius': '5px',
+                'textAlign': 'center',
+                'fontWeight': 'bold',
+                'marginTop': '5px',
+                'border': '1px solid #666'
+            })
         ]),
         
         # Expert rule visualization
@@ -715,11 +822,13 @@ def update_discretized_state(data):
             html.Div("Active Expert Rules:", style={'fontWeight': 'bold', 'marginTop': '15px', 'marginBottom': '5px'}),
             html.Ul([
                 html.Li(f"Temperature: {get_temp_rule(temp_zone)}", 
-                       style={'color': thermal_colors.get(temp_zone, '#888888')}),
-                html.Li(f"Power: {get_power_rule(latest.get('power_cost', 0))}",
-                       style={'color': '#006600' if latest.get('power_cost', 0) < 4.5 else
-                                     '#cc6600' if latest.get('power_cost', 0) < 6.0 else
-                                     '#cc0000'}),
+                       style={'color': '#00aa00' if temp_zone == "Safe" else
+                                      '#aaaa00' if temp_zone == "Warning" else
+                                      '#aa0000'}),
+                html.Li(f"Battery: {get_battery_rule(battery_zone)}",
+                       style={'color': '#006600' if battery_zone in ['61-80%', '81-100%'] else
+                                      '#999900' if battery_zone == '41-60%' else
+                                      '#cc3300'}),
                 html.Li(f"Algorithm: {get_algorithm_rule(latest.get('action_label', 'Unknown'))}",
                        style={'fontWeight': 'bold'})
             ])
@@ -752,6 +861,17 @@ def get_algorithm_rule(algorithm):
         'TST': 'Maximum detection capability'
     }
     return rules.get(algorithm, 'Unknown algorithm')
+
+# Additional helper function for battery rules
+def get_battery_rule(battery_zone):
+    rules = {
+        '0-20%': 'CRITICAL: Only No_DDoS allowed',
+        '21-40%': 'LOW: Avoid TST algorithm',
+        '41-60%': 'MEDIUM: All algorithms allowed with caution',
+        '61-80%': 'HIGH: All algorithms allowed',
+        '81-100%': 'FULL: All algorithms allowed'
+    }
+    return rules.get(battery_zone, 'Unknown battery status')
 
 # Run the app
 if __name__ == '__main__':

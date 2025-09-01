@@ -1,0 +1,19 @@
+{
+  "timestamp": "20250902_0426",
+  "training_time_seconds": 1.309406042098999,
+  "episodes": 200,
+  "final_reward": 16.06249999999995,
+  "expert_alignment": 0.9111111111111111,
+  "eval_results": {
+    "avg_reward": 428.4953749999958,
+    "avg_expert_alignment": 0.9971916906882622,
+    "total_safety_violations": 51,
+    "avg_power": 8002.160909716355,
+    "action_distribution": [
+      93898,
+      1121,
+      148
+    ]
+  },
+  "policy_mismatches": 4
+}

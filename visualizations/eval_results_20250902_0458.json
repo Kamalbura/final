@@ -1,0 +1,20 @@
+{
+  "timestamp": "20250902_0458",
+  "training_time_seconds": 1.3499274253845215,
+  "episodes": 200,
+  "final_reward": 186.43124999999904,
+  "expert_alignment": 1.0,
+  "model_path": "models/uav_ddos_lookup_model_20250902_0458.json",
+  "eval_results": {
+    "avg_reward": 383.0912499999954,
+    "avg_expert_alignment": 0.9954413688167081,
+    "total_safety_violations": 123,
+    "avg_power": 8001.760301665574,
+    "action_distribution": [
+      93700,
+      1135,
+      219
+    ]
+  },
+  "policy_mismatches": 0
+}

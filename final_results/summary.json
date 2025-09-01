@@ -1,0 +1,9 @@
+{
+  "generated_at": "2025-09-01T23:43:18.820713Z",
+  "model_file": "final_results\\uav_ddos_lookup_model_20250902_0510.json",
+  "plots": [
+    "final_results\\temp_vs_threat_policy.png",
+    "final_results\\battery_vs_threat_policy.png"
+  ],
+  "policy_rules": "Critical temp or 0-20% battery -> No_DDoS; Confirming -> TST; else XGBoost"
+}

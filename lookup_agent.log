@@ -99,3 +99,6 @@
 2025-09-01 20:28:41,285 - LookupTableRL - INFO - Decision: XGBoost for state ('61-80%', 'Safe', 'Normal')
 2025-09-01 20:28:41,391 - LookupTableRL - INFO - Decision: XGBoost for state ('61-80%', 'Safe', 'Normal')
 2025-09-01 20:28:41,491 - LookupTableRL - INFO - Decision: XGBoost for state ('61-80%', 'Safe', 'Normal')
+2025-09-02 02:53:07,029 - LookupTableRL - INFO - Lookup Table RL Agent initialized
+2025-09-02 02:53:07,029 - LookupTableRL - INFO - Decision: TST for state ('61-80%', 'Safe', 'Confirming')
+2025-09-02 02:53:07,030 - LookupTableRL - INFO - Lookup table saved to: models/lookup_table_expert.json
