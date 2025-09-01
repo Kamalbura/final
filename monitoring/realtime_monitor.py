@@ -15,6 +15,8 @@ import threading
 import queue
 import logging
 from datetime import datetime
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -28,6 +30,186 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+@dataclass
+class AlgorithmProfile:
+    """Algorithm performance characteristics"""
+    cpu_avg: float
+    cpu_variance: float
+    power_factor: float
+    thermal_coefficient: float
+    effectiveness: float
+    memory_impact: float
+    cooling_factor: float  # Added cooling factor for algorithm-specific cooling
+
+class ThermalSimulator:
+    """High-fidelity thermal simulation for Raspberry Pi UAV system"""
+    
+    def __init__(self):
+        # Thermal characteristics (from real data analysis)
+        self.thermal_mass = 8.2  # J/°C
+        self.thermal_resistance = 12.5  # °C/W
+        self.ambient_temp = 25.0  # °C
+        self.current_temp = 50.0  # °C starting temperature
+        self.temp_history = []
+        
+        # Algorithm profiles with cooling factors (based on your measurements)
+        self.algorithms = {
+            'No_DDoS': AlgorithmProfile(8, 5, 1.0, 0.02, 0.0, 0.0, 1.5),    # Fastest cooling
+            'XGBoost': AlgorithmProfile(35, 15, 1.4, 0.12, 0.85, 2.0, 1.0),  # Standard cooling
+            'TST': AlgorithmProfile(85, 10, 2.1, 0.25, 0.95, 14.0, 0.5),     # Slowest cooling
+        }
+        
+        # Thermal time constants from data analysis
+        self.heating_rate = 0.125  # °C/second at high load
+        self.cooling_rate = 0.05   # °C/second at idle
+        self.thermal_lag = 60      # seconds thermal time constant
+        
+        # Track algorithm transitions for cooling effects
+        self.previous_algorithm = 'No_DDoS'
+        self.algorithm_change_time = time.time()
+        self.tst_recovery_time = 240  # seconds to recover from TST (measured)
+        
+        # Temperature setpoint (equilibrium temp for current algorithm)
+        self.temp_setpoint = 50.0
+        
+    def update_temperature(self, algorithm_idx: int, dt: float = 1.0) -> Tuple[float, float]:
+        """Update temperature based on current algorithm with realistic cooling"""
+        # Map algorithm index to name
+        algorithm_names = ['No_DDoS', 'XGBoost', 'TST']
+        algorithm = algorithm_names[algorithm_idx] if 0 <= algorithm_idx < 3 else 'No_DDoS'
+        
+        profile = self.algorithms.get(algorithm, self.algorithms['No_DDoS'])
+        
+        # Check for algorithm transition
+        current_time = time.time()
+        if algorithm != self.previous_algorithm:
+            # Record algorithm change time for thermal lag calculations
+            self.algorithm_change_time = current_time
+            
+            # If coming from TST, mark this for special cooling behavior
+            if self.previous_algorithm == 'TST':
+                logging.info(f"Detected transition from TST to {algorithm}, starting cooling cycle")
+            
+            self.previous_algorithm = algorithm
+        
+        # Calculate time since algorithm change to model thermal lag
+        time_since_change = current_time - self.algorithm_change_time
+        transition_factor = min(1.0, time_since_change / self.thermal_lag)
+        
+        # Heat generation (algorithm-specific)
+        cpu_usage = np.random.normal(profile.cpu_avg, profile.cpu_variance)
+        cpu_usage = np.clip(cpu_usage, 0, 100)  # Clamp to valid range
+        
+        # Calculate temperature setpoint for current algorithm
+        # This is the equilibrium temperature this algorithm would reach if run indefinitely
+        algo_setpoint = self.ambient_temp + (cpu_usage * profile.thermal_coefficient * self.thermal_resistance)
+        
+        # Gradual transition of setpoint based on thermal lag
+        if time_since_change < self.thermal_lag:
+            # During transition period, blend old and new setpoints
+            old_setpoint = self.temp_setpoint
+            self.temp_setpoint = old_setpoint * (1 - transition_factor) + algo_setpoint * transition_factor
+        else:
+            # After transition period, use actual algorithm setpoint
+            self.temp_setpoint = algo_setpoint
+        
+        # Apply special cooling behavior for TST → XGBoost transition (240s recovery)
+        tst_transition_cooldown = False
+        if self.previous_algorithm == 'TST' and time_since_change < self.tst_recovery_time:
+            # Slow recovery from TST thermal buildup
+            tst_transition_cooldown = True
+            recovery_progress = time_since_change / self.tst_recovery_time
+            # Gradual cooling from TST temperature to algorithm setpoint
+            cooling_setpoint = self.temp_setpoint + (75.0 - self.temp_setpoint) * (1.0 - recovery_progress)
+            self.temp_setpoint = cooling_setpoint
+        
+        # Newton's law of cooling (heat transfer proportional to temperature difference)
+        # Direction and rate depends on whether we're heating up or cooling down
+        if self.current_temp < self.temp_setpoint:
+            # Heating up - use algorithm's thermal coefficient
+            rate = self.heating_rate
+        else:
+            # Cooling down - use algorithm's cooling factor
+            rate = self.cooling_rate * profile.cooling_factor
+            
+            # Special case: much slower cooling when coming down from TST
+            if tst_transition_cooldown:
+                # TST has severe thermal inertia, cooling is slower than normal
+                rate *= 0.5  # 50% slower cooling during TST recovery period
+        
+        # Temperature change based on difference from setpoint and rate
+        temp_diff = self.temp_setpoint - self.current_temp
+        temp_change = temp_diff * rate * dt
+        
+        # Apply temperature change with some noise
+        self.current_temp += temp_change + np.random.normal(0, 0.02)  # Small random fluctuations
+        self.temp_history.append(self.current_temp)
+        
+        # Keep history manageable
+        if len(self.temp_history) > 1000:
+            self.temp_history = self.temp_history[-500:]
+            
+        return self.current_temp, cpu_usage
+    
+    def get_thermal_trend(self) -> float:
+        """Calculate temperature derivative"""
+        if len(self.temp_history) < 2:
+            return 0.0
+        return self.temp_history[-1] - self.temp_history[-2]
+    
+    def get_temperature_category(self) -> str:
+        """Get temperature category based on current temperature"""
+        if self.current_temp <= 55:
+            return "Safe"
+        elif self.current_temp <= 70:
+            return "Warning"
+        else:
+            return "Critical"
+    
+    def is_thermal_emergency(self) -> bool:
+        """Check if thermal emergency conditions exist"""
+        return self.current_temp > 75.0  # Critical threshold
+    
+    def reset(self, start_temp: float = 50.0):
+        """Reset thermal state"""
+        self.current_temp = start_temp
+        self.temp_history = []
+
+class PowerMonitor:
+    """Accurate power consumption tracking using V×I×Δt method"""
+    
+    def __init__(self):
+        self.voltage = 5.1  # RPi typical voltage
+        self.baseline_current = 0.7  # Amps at idle
+        self.current_consumption = self.baseline_current
+        self.power_history = []
+        self.cumulative_energy = 0.0
+        
+    def calculate_power(self, algorithm_idx: int, thermal_sim: ThermalSimulator) -> float:
+        """Calculate real-time power consumption"""
+        # Map algorithm index to name
+        algorithm_names = ['No_DDoS', 'XGBoost', 'TST']
+        algorithm = algorithm_names[algorithm_idx] if 0 <= algorithm_idx < 3 else 'No_DDoS'
+        
+        profile = thermal_sim.algorithms.get(algorithm, thermal_sim.algorithms['No_DDoS'])
+        
+        # Current consumption based on algorithm and temperature
+        base_current = self.baseline_current * profile.power_factor
+        thermal_factor = 1.0 + (thermal_sim.current_temp - 50) * 0.01  # 1% per degree
+        
+        self.current_consumption = base_current * thermal_factor
+        power = self.voltage * self.current_consumption
+        
+        self.power_history.append(power)
+        self.cumulative_energy += power  # Accumulate energy over time
+        
+        return power
+    
+    def get_efficiency_metric(self, algorithm_effectiveness: float) -> float:
+        """Calculate performance per watt"""
+        current_power = self.power_history[-1] if self.power_history else 3.57
+        return algorithm_effectiveness / current_power if current_power > 0 else 0
 
 class MetricsCollector:
     """Collects real-time metrics from the UAV system"""
@@ -43,10 +225,19 @@ class MetricsCollector:
         self.action_history = []
         self.battery_history = []
         self.threat_history = []
+        self.cpu_history = []
         
         # Initialize timestamps
         self.timestamps = []
         self.start_time = time.time()
+        
+        # Enhanced thermal and power simulation
+        self.thermal_simulator = ThermalSimulator()
+        self.power_monitor = PowerMonitor()
+        
+        # Time since last algorithm switch
+        self.last_algorithm_change = 0
+        self.current_algorithm = 0
     
     def start(self):
         """Start metrics collection thread"""
@@ -82,31 +273,21 @@ class MetricsCollector:
                 logging.error(f"Error collecting metrics: {e}")
     
     def _collect_system_metrics(self):
-        """Collect metrics from system (would connect to real sensors)"""
-        # In a real implementation, this would read from actual sensors
-        # For demonstration, we'll simulate values
+        """Collect metrics from system with enhanced thermal model"""
+        # Determine current action based on state and algorithm switching rules
+        action = self._determine_next_action()
         
-        # Simulate power consumption based on current action
-        # This would read from actual power sensors in production
-        current_action = self.action_history[-1] if self.action_history else 0
-        power_base = [3.0, 5.5, 9.0][current_action]  # Base power for each action
-        power_variation = np.random.normal(0, 0.2)  # Add some noise
-        power = max(0, power_base + power_variation)
+        # Update thermal simulator with current algorithm
+        temp, cpu_usage = self.thermal_simulator.update_temperature(action, dt=self.update_interval)
         
-        # Simulate temperature based on power consumption
-        # In reality, this would read from thermal sensors
-        if not self.temp_history:
-            temp = 30.0  # Starting temperature
-        else:
-            # Temperature increases with power and decreases with time
-            temp_increase = power * 0.01  # Higher power = faster heating
-            cooling = max(0, (self.temp_history[-1] - 30) * 0.01)  # Natural cooling
-            temp = self.temp_history[-1] + temp_increase - cooling + np.random.normal(0, 0.1)
+        # Calculate power consumption
+        power = self.power_monitor.calculate_power(action, self.thermal_simulator)
         
         # Simulate battery level decreasing with power usage
         if not self.battery_history:
             battery = 90.0  # Start with 90% battery
         else:
+            # More realistic battery drain based on power consumption
             battery_drain = power * 0.005  # Higher power = faster drain
             battery = max(0, self.battery_history[-1] - battery_drain)
         
@@ -118,17 +299,6 @@ class MetricsCollector:
         else:
             threat = self.threat_history[-1]
         
-        # Current action (would come from RL agent)
-        # For simulation, we'll use a simple heuristic
-        if battery < 20 or temp > 70:
-            action = 0  # No DDoS for critical conditions
-        elif threat == 0:  # Normal
-            action = 1 if battery > 40 else 0  # XGBoost if sufficient battery
-        elif threat == 1:  # Confirming
-            action = 2 if battery > 60 and temp < 60 else 1  # TST if resources good
-        else:  # Confirmed
-            action = 1  # XGBoost for monitoring
-        
         # Record timestamp
         timestamp = time.time() - self.start_time
         
@@ -137,10 +307,56 @@ class MetricsCollector:
             'timestamp': timestamp,
             'power': power,
             'temperature': temp,
+            'cpu_usage': cpu_usage,
             'battery': battery,
             'threat': threat,
-            'action': action
+            'action': action,
+            'thermal_category': self.thermal_simulator.get_temperature_category(),
+            'thermal_trend': self.thermal_simulator.get_thermal_trend(),
+            'thermal_emergency': self.thermal_simulator.is_thermal_emergency(),
+            'time_since_algorithm_change': timestamp - self.last_algorithm_change
         }
+    
+    def _determine_next_action(self):
+        """Determine next action based on current state using the decision rules"""
+        # Get current state
+        if not self.temp_history:
+            temp = 50.0
+            battery = 90.0
+            threat = 0
+        else:
+            temp = self.temp_history[-1]
+            battery = self.battery_history[-1]
+            threat = self.threat_history[-1]
+        
+        # Get current algorithm
+        current_algorithm = self.current_algorithm if self.action_history else 0
+        
+        # Check for TST thermal limit - emergency transition to XGBoost for cooling
+        if current_algorithm == 2 and temp > 70:  # TST causing overheating
+            new_action = 1  # Switch to XGBoost for cooling
+            logging.warning(f"THERMAL EMERGENCY: Switching from TST to XGBoost for cooling, temp={temp:.1f}°C")
+            self.last_algorithm_change = time.time() - self.start_time
+            self.current_algorithm = new_action
+            return new_action
+        
+        # Apply expert decision rules
+        if battery < 20 or temp > 70:  # Critical conditions
+            new_action = 0  # No DDoS - protect system
+        elif threat == 0:  # Normal
+            new_action = 1 if battery > 40 else 0  # XGBoost if sufficient battery
+        elif threat == 1:  # Confirming
+            # TST only if sufficient resources and temperature is safe
+            new_action = 2 if (battery > 60 and temp < 60) else 1
+        else:  # Confirmed
+            new_action = 1  # XGBoost for monitoring
+            
+        # Check if algorithm is changing
+        if new_action != current_algorithm:
+            self.last_algorithm_change = time.time() - self.start_time
+            self.current_algorithm = new_action
+            
+        return new_action
     
     def _update_history(self, metrics):
         """Update metrics history"""
@@ -150,6 +366,7 @@ class MetricsCollector:
         self.battery_history.append(metrics['battery'])
         self.threat_history.append(metrics['threat'])
         self.action_history.append(metrics['action'])
+        self.cpu_history.append(metrics['cpu_usage'])
         
         # Keep history to a reasonable size
         max_history = 1000
@@ -160,6 +377,7 @@ class MetricsCollector:
             self.battery_history = self.battery_history[-max_history:]
             self.threat_history = self.threat_history[-max_history:]
             self.action_history = self.action_history[-max_history:]
+            self.cpu_history = self.cpu_history[-max_history:]
     
     def get_latest_metrics(self):
         """Get latest metrics"""
@@ -176,7 +394,8 @@ class MetricsCollector:
             'temperature': self.temp_history,
             'battery': self.battery_history,
             'threat': self.threat_history,
-            'action': self.action_history
+            'action': self.action_history,
+            'cpu': self.cpu_history
         }
     
     def save_history(self, filepath):
@@ -198,8 +417,8 @@ class RealtimeMonitor:
     def __init__(self):
         self.metrics_collector = MetricsCollector()
         
-        # Create figure for plotting
-        self.fig, self.axes = plt.subplots(3, 1, figsize=(10, 10))
+        # Create figure for plotting with CPU usage added
+        self.fig, self.axes = plt.subplots(4, 1, figsize=(12, 12))
         self.fig.suptitle('UAV DDoS-RL Real-time Monitoring', fontsize=16)
         
         # Initialize plots
@@ -209,37 +428,48 @@ class RealtimeMonitor:
         self.ani = None
     
     def _setup_plots(self):
-        """Set up the plots"""
+        """Set up the plots with enhanced visualizations"""
         # Power plot
         self.power_line, = self.axes[0].plot([], [], 'b-', label='Power (W)')
         self.axes[0].set_title('Power Consumption')
         self.axes[0].set_xlabel('Time (s)')
         self.axes[0].set_ylabel('Power (W)')
-        self.axes[0].set_ylim(0, 10)
+        self.axes[0].set_ylim(0, 12)
+        self.axes[0].axhline(y=5.5, color='orange', linestyle='--', label='XGBoost Level')
+        self.axes[0].axhline(y=9.0, color='red', linestyle='--', label='TST Level')
         self.axes[0].grid(True)
         self.axes[0].legend()
         
         # Temperature plot
         self.temp_line, = self.axes[1].plot([], [], 'r-', label='Temperature')
-        self.warning_line = self.axes[1].axhline(y=70, color='orange', linestyle='--', label='Warning')
-        self.critical_line = self.axes[1].axhline(y=80, color='red', linestyle='--', label='Critical')
+        self.warning_line = self.axes[1].axhline(y=65, color='orange', linestyle='--', label='Warning (65°C)')
+        self.critical_line = self.axes[1].axhline(y=70, color='red', linestyle='--', label='Critical (70°C)')
         self.axes[1].set_title('Temperature')
         self.axes[1].set_xlabel('Time (s)')
         self.axes[1].set_ylabel('Temperature (°C)')
-        self.axes[1].set_ylim(20, 90)
+        self.axes[1].set_ylim(30, 80)
         self.axes[1].grid(True)
         self.axes[1].legend()
         
-        # Battery and action plot
-        self.battery_line, = self.axes[2].plot([], [], 'g-', label='Battery (%)')
-        self.axes[2].set_title('Battery & Action')
+        # CPU usage plot (new)
+        self.cpu_line, = self.axes[2].plot([], [], 'purple', label='CPU Usage')
+        self.axes[2].set_title('CPU Usage')
         self.axes[2].set_xlabel('Time (s)')
-        self.axes[2].set_ylabel('Battery (%)')
+        self.axes[2].set_ylabel('CPU (%)')
         self.axes[2].set_ylim(0, 100)
         self.axes[2].grid(True)
+        self.axes[2].legend()
+        
+        # Battery and action plot
+        self.battery_line, = self.axes[3].plot([], [], 'g-', label='Battery (%)')
+        self.axes[3].set_title('Battery & Action')
+        self.axes[3].set_xlabel('Time (s)')
+        self.axes[3].set_ylabel('Battery (%)')
+        self.axes[3].set_ylim(0, 100)
+        self.axes[3].grid(True)
         
         # Secondary axis for actions
-        self.ax2 = self.axes[2].twinx()
+        self.ax2 = self.axes[3].twinx()
         self.action_scatter = self.ax2.scatter([], [], c=[], cmap='viridis', 
                                               marker='o', label='Action')
         self.ax2.set_ylabel('Action')
@@ -248,12 +478,12 @@ class RealtimeMonitor:
         self.ax2.set_yticklabels(['No DDoS', 'XGBoost', 'TST'])
         
         # Add legend for both y-axes
-        lines, labels = self.axes[2].get_legend_handles_labels()
+        lines, labels = self.axes[3].get_legend_handles_labels()
         lines2, labels2 = self.ax2.get_legend_handles_labels()
         self.ax2.legend(lines + lines2, labels + labels2, loc='upper right')
         
         plt.tight_layout()
-        plt.subplots_adjust(top=0.9, hspace=0.3)
+        plt.subplots_adjust(top=0.92, hspace=0.4)
     
     def _update_plots(self, frame):
         """Update plots with new data"""
@@ -266,15 +496,19 @@ class RealtimeMonitor:
         self.axes[0].set_xlim(0, max(history['timestamps']) + 1)
         if history['power']:
             max_power = max(history['power'])
-            self.axes[0].set_ylim(0, max(max_power * 1.1, 10))
+            self.axes[0].set_ylim(0, max(max_power * 1.1, 12))
         
         # Update temperature plot
         self.temp_line.set_data(history['timestamps'], history['temperature'])
         self.axes[1].set_xlim(0, max(history['timestamps']) + 1)
         
+        # Update CPU plot
+        self.cpu_line.set_data(history['timestamps'], history['cpu'])
+        self.axes[2].set_xlim(0, max(history['timestamps']) + 1)
+        
         # Update battery and action plot
         self.battery_line.set_data(history['timestamps'], history['battery'])
-        self.axes[2].set_xlim(0, max(history['timestamps']) + 1)
+        self.axes[3].set_xlim(0, max(history['timestamps']) + 1)
         
         # Update action scatter plot
         self.action_scatter.set_offsets(np.column_stack((history['timestamps'], history['action'])))
@@ -285,15 +519,16 @@ class RealtimeMonitor:
         current_temp = history['temperature'][-1] if history['temperature'] else 0
         current_battery = history['battery'][-1] if history['battery'] else 0
         current_action = history['action'][-1] if history['action'] else 0
+        current_cpu = history['cpu'][-1] if history['cpu'] else 0
         action_names = ["No DDoS", "XGBoost", "TST"]
         
         # Update title with current metrics
         self.fig.suptitle(f'UAV DDoS-RL Monitoring - Power: {current_power:.1f}W, '
-                         f'Temp: {current_temp:.1f}°C, Battery: {current_battery:.1f}%, '
+                         f'Temp: {current_temp:.1f}°C, CPU: {current_cpu:.1f}%, '
                          f'Action: {action_names[current_action]}', 
                          fontsize=14)
         
-        return [self.power_line, self.temp_line, self.battery_line, self.action_scatter]
+        return [self.power_line, self.temp_line, self.cpu_line, self.battery_line, self.action_scatter]
     
     def start(self):
         """Start monitoring"""
