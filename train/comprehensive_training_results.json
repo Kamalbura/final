@@ -1,0 +1,25 @@
+{
+  "training_summary": {
+    "episodes": 200,
+    "final_reward": 873.0,
+    "final_expert_alignment": 0.9375,
+    "total_safety_violations": 0,
+    "final_epsilon": 0.11008734651784999
+  },
+  "evaluation_summary": {
+    "avg_reward": 697.31,
+    "avg_expert_alignment": 1.0,
+    "total_safety_violations": 0,
+    "avg_power_consumption": 57.125,
+    "action_distribution": {
+      "No_DDoS": 616,
+      "XGBoost": 467,
+      "TST": 144
+    }
+  },
+  "policy_analysis": {
+    "perfect_alignments": 34,
+    "total_states_tested": 34,
+    "alignment_percentage": 100.0
+  }
+}

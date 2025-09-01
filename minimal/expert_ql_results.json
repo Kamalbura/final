@@ -1,0 +1,12 @@
+{
+  "approach": "Expert Lookup Table \u2192 Q-table Initialization",
+  "state_space_size": 45,
+  "training_episodes": 100,
+  "avg_reward": 11.9725,
+  "avg_power_consumption": 75.555,
+  "avg_detections": 8.18,
+  "q_values_modified": 95,
+  "expert_policy_preservation": "80%",
+  "convergence_speed": "Fast (100 episodes)",
+  "deployment_readiness": "Immediate"
+}
